@@ -264,6 +264,7 @@ class FieldProcessing(dj.Computed):
 
     def make(self, key):
         execution_time = datetime.utcnow()
+        raw_root_data_dir = scan.get_imaging_root_data_dir()
         processed_root_data_dir = scan.get_processed_root_data_dir()
 
         output_dir, params = (FieldPreprocessing.Field & key).fetch1(
@@ -283,10 +284,13 @@ class FieldProcessing(dj.Computed):
             from caiman.summary_images import local_correlations
             from element_interface.run_caiman import run_caiman
 
-            file_paths = [
-                find_full_path(processed_root_data_dir, f)
-                for f in extra_params["image_files"]
-            ]
+            if len(scan.ScanInfo.ScanFile & key) > 1:
+                file_paths = [
+                    find_full_path(processed_root_data_dir, f)
+                    for f in extra_params["image_files"]
+                ]
+            elif len(scan.ScanInfo.ScanFile & key) == 1:
+                file_paths = find_full_path(raw_root_data_dir, extra_params["image_files"][0])
             rho = local_correlations(
                             tifffile.imread(file_paths)
                         )
