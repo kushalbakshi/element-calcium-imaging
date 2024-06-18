@@ -129,18 +129,20 @@ class FieldPreprocessing(dj.Computed):
             for field_idx, plane_idx in zip(field_ind, PVmeta.meta["plane_indices"]):
                 pln_output_dir = output_dir / f"pln{plane_idx}_chn{channel}"
                 pln_output_dir.mkdir(parents=True, exist_ok=True)
+                if len(scan.ScanInfo.ScanFile & key) > 1:
+                    prepared_input_dir = output_dir.parent / "prepared_input"
+                    prepared_input_dir.mkdir(exist_ok=True)
 
-                prepared_input_dir = output_dir.parent / "prepared_input"
-                prepared_input_dir.mkdir(exist_ok=True)
-
-                image_files = [
-                    PVmeta.write_single_bigtiff(
-                        plane_idx=plane_idx,
-                        channel=channel,
-                        output_dir=prepared_input_dir,
-                        caiman_compatible=True,
-                    )
-                ]
+                    image_files = [
+                        PVmeta.write_single_bigtiff(
+                            plane_idx=plane_idx,
+                            channel=channel,
+                            output_dir=prepared_input_dir,
+                            caiman_compatible=True,
+                        )
+                    ]
+                elif len(scan.ScanInfo.ScanFile & key) == 1:
+                    image_files = find_full_path(scan.get_imaging_root_data_dir(), image_file)
 
                 field_processing_tasks.append(
                     {
