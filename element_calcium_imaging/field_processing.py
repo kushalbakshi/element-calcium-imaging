@@ -133,7 +133,7 @@ class FieldPreprocessing(dj.Computed):
                     prepared_input_dir = output_dir.parent / "prepared_input"
                     prepared_input_dir.mkdir(exist_ok=True)
 
-                    image_files = [
+                    image_files_li = [
                         PVmeta.write_single_bigtiff(
                             plane_idx=plane_idx,
                             channel=channel,
@@ -141,8 +141,12 @@ class FieldPreprocessing(dj.Computed):
                             caiman_compatible=True,
                         )
                     ]
+                    image_files = [
+                                    f.relative_to(processed_root_data_dir).as_posix()
+                                    for f in image_files_li
+                                ]
                 elif len(scan.ScanInfo.ScanFile & key) == 1:
-                    image_files = find_full_path(scan.get_imaging_root_data_dir(), image_file)
+                    image_files = [image_file]
 
                 field_processing_tasks.append(
                     {
@@ -153,10 +157,7 @@ class FieldPreprocessing(dj.Computed):
                             "extra_dj_params": {
                                 "channel": channel,
                                 "plane_idx": plane_idx,
-                                "image_files": [
-                                    f.relative_to(processed_root_data_dir).as_posix()
-                                    for f in image_files
-                                ],
+                                "image_files": image_files,
                             },
                         },
                         "processing_output_dir": pln_output_dir.relative_to(
