@@ -526,6 +526,7 @@ class Processing(dj.Computed):
                 processed_dir = pathlib.Path(get_processed_root_data_dir())
                 output_dir = processed_dir / output_dir
                 output_dir.mkdir(parents=True, exist_ok=True)
+                output_dir = output_dir.as_posix()
             else:
                 raise e
 
