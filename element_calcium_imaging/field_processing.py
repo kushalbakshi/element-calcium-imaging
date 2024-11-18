@@ -590,5 +590,5 @@ class PostProcessing(dj.Computed):
                 }
                 for f in output_dir.rglob("*")
                 if f.is_file()
-            ]
+            ], allow_direct_insert=True
         )
