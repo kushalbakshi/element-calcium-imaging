@@ -5,10 +5,12 @@ import pathlib
 from collections.abc import Callable
 from datetime import datetime
 import re
+import os
 
 import datajoint as dj
 import numpy as np
 from element_interface.utils import dict_to_uuid, find_full_path, find_root_directory
+from element_interface.utils import memoized_result
 
 from . import scan
 
@@ -41,14 +43,14 @@ def activate(
         create_tables=create_tables,
         add_objects=imaging.__dict__,
     )
-    imaging.Processing.key_source -= FieldPreprocessing.key_source.proj()
+    imaging.Processing.key_source -= PreProcessing.key_source.proj()
 
 
 # ---------------- Multi-field Processing (per-field basis) ----------------
 
 
 @schema
-class FieldPreprocessing(dj.Computed):
+class PreProcessing(dj.Computed):
     definition = """
     -> imaging.ProcessingTask
     ---
@@ -124,116 +126,55 @@ class FieldPreprocessing(dj.Computed):
                 if PVmeta.meta["num_channels"] > 1
                 else PVmeta.meta["channels"][0]
             )
+            prepared_input_dir = output_dir.parent / "prepared_input"
+            prepared_input_dir.mkdir(exist_ok=True)
 
-            field_processing_tasks = []
-            for field_idx, plane_idx in zip(field_ind, PVmeta.meta["plane_indices"]):
-                pln_output_dir = output_dir / f"pln{plane_idx}_chn{channel}"
-                pln_output_dir.mkdir(parents=True, exist_ok=True)
+            @memoized_result(
+                uniqueness_dict=params,
+                output_directory=prepared_input_dir,
+            )
+            def _run_write_bigtiff():
+                _field_processing_tasks = []
+                for field_idx, plane_idx in zip(
+                    field_ind, PVmeta.meta["plane_indices"]
+                ):
+                    pln_output_dir = output_dir / f"pln{plane_idx}_chn{channel}"
+                    pln_output_dir.mkdir(parents=True, exist_ok=True)
 
-                prepared_input_dir = output_dir.parent / "prepared_input"
-                prepared_input_dir.mkdir(exist_ok=True)
-
-                image_files = [
-                    PVmeta.write_single_bigtiff(
+                    image_files = PVmeta.write_single_bigtiff(
                         plane_idx=plane_idx,
                         channel=channel,
                         output_dir=prepared_input_dir,
                         caiman_compatible=True,
+                        overwrite=True,
+                        gb_per_file=4,
                     )
-                ]
 
-                field_processing_tasks.append(
-                    {
-                        **key,
-                        "field_idx": field_idx,
-                        "params": {
-                            **params,
-                            "extra_dj_params": {
-                                "channel": channel,
-                                "plane_idx": plane_idx,
-                                "image_files": [
-                                    f.relative_to(processed_root_data_dir).as_posix()
-                                    for f in image_files
-                                ],
+                    _field_processing_tasks.append(
+                        {
+                            **key,
+                            "field_idx": field_idx,
+                            "params": {
+                                **params,
+                                "extra_dj_params": {
+                                    "channel": channel,
+                                    "plane_idx": plane_idx,
+                                    "image_files": [
+                                        f.relative_to(
+                                            processed_root_data_dir
+                                        ).as_posix()
+                                        for f in image_files
+                                    ],
+                                },
                             },
-                        },
-                        "processing_output_dir": pln_output_dir.relative_to(
-                            processed_root_data_dir
-                        ).as_posix(),
-                    }
-                )
-        elif method == "suite2p" and acq_software == "ScanImage" and nrois > 0:
-            import scanreader
-            from suite2p import default_ops, io
+                            "processing_output_dir": pln_output_dir.relative_to(
+                                processed_root_data_dir
+                            ).as_posix(),
+                        }
+                    )
+                return _field_processing_tasks
 
-            image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
-            image_files = [
-                find_full_path(scan.get_imaging_root_data_dir(), image_file).as_posix()
-                for image_file in image_files
-            ]
-
-            scan_ = scanreader.read_scan(image_files)
-
-            ops = {**default_ops(), **params}
-
-            ops["save_path0"] = output_dir.as_posix()
-            ops["save_folder"] = "suite2p"
-            ops["fs"] = sampling_rate
-            ops["nplanes"] = ndepths
-            ops["nchannels"] = nchannels
-            ops["input_format"] = pathlib.Path(image_files[0]).suffix[1:]
-            ops["data_path"] = [pathlib.Path(image_files[0]).parent.as_posix()]
-            ops["tiff_list"] = [f for f in image_files]
-            ops["force_sktiff"] = False
-
-            ops.update(
-                {
-                    "mesoscan": True,
-                    "input_format": "mesoscan",
-                    "nrois": nfields,
-                    "dx": [],  # x-offset for each field
-                    "dy": [],  # y-offset for each field
-                    "slices": [],  # plane index for each field
-                    "lines": [],  # row indices for each field
-                }
-            )
-            for field_idx, field_info in enumerate(scan_.fields):
-                ops["dx"].append(field_info.xslices[0].start)
-                ops["dy"].append(field_info.yslices[0].start)
-                ops["slices"].append(field_info.slice_id)
-                ops["lines"].append(
-                    np.arange(field_info.yslices[0].start, field_info.yslices[0].stop)
-                )
-
-            # generate binary files for each field
-            save_folder = output_dir / ops["save_folder"]
-            save_folder.mkdir(exist_ok=True)
-            _ = io.mesoscan_to_binary(ops.copy())
-
-            ops_paths = [f for f in save_folder.rglob("plane*/ops.npy")]
-            assert len(ops_paths) == nfields
-
-            field_processing_tasks = []
-            for ops_path in ops_paths:
-                ops = np.load(ops_path, allow_pickle=True).item()
-                ops["extra_dj_params"] = {
-                    "ops_path": ops_path.relative_to(
-                        processed_root_data_dir
-                    ).as_posix(),
-                    "field_idx": int(
-                        re.search(r"plane(\d+)", ops_path.parent.name).group(1)
-                    ),
-                }
-                field_processing_tasks.append(
-                    {
-                        **key,
-                        "field_idx": ops["extra_dj_params"]["field_idx"],
-                        "params": ops,
-                        "processing_output_dir": ops_path.parent.relative_to(
-                            processed_root_data_dir
-                        ).as_posix(),
-                    }
-                )
+            field_processing_tasks = _run_write_bigtiff()
         else:
             raise NotImplementedError(
                 f"Field processing for {acq_software} scans with {method} is not yet supported in this table."
@@ -251,19 +192,20 @@ class FieldPreprocessing(dj.Computed):
 
 
 @schema
-class FieldProcessing(dj.Computed):
+class FieldMotionCorrection(dj.Computed):
     definition = """
-    -> FieldPreprocessing.Field
+    -> PreProcessing.Field
     ---
     execution_time: datetime   # datetime of the start of this step
     execution_duration: float  # (hour) execution duration
+    mc_params: longblob  # parameter set for this run
     """
 
     def make(self, key):
         execution_time = datetime.utcnow()
         processed_root_data_dir = scan.get_processed_root_data_dir()
 
-        output_dir, params = (FieldPreprocessing.Field & key).fetch1(
+        output_dir, params = (PreProcessing.Field & key).fetch1(
             "processing_output_dir", "params"
         )
         extra_params = params.pop("extra_dj_params", {})
@@ -276,36 +218,304 @@ class FieldProcessing(dj.Computed):
         sampling_rate = (scan.ScanInfo & key).fetch1("fps")
 
         if acq_software == "PrairieView" and method == "caiman":
+            import multiprocessing
             import tifffile
+            from element_interface.run_caiman import _save_mc
+            import caiman as cm
             from caiman.summary_images import local_correlations
-            from element_interface.run_caiman import run_caiman
+            from caiman.source_extraction.cnmf.cnmf import CNMF
+            from caiman.motion_correction import MotionCorrect
+            from caiman.source_extraction.cnmf.params import CNMFParams
 
             file_paths = [
                 find_full_path(processed_root_data_dir, f)
                 for f in extra_params["image_files"]
             ]
-            rho = local_correlations(
-                            tifffile.imread(file_paths)
+
+            images = []
+            for f in file_paths:
+                with tifffile.TiffFile(f) as tffl:
+                    # downsample by 1000x in time
+                    images.append(
+                        tffl.asarray(key=np.arange(0, len(tffl.pages), 1000)).transpose(
+                            1, 2, 0
                         )
-            half_median_correlation = np.median(rho) / 2
+                    )
+
+            rho = local_correlations(np.dstack(images))
+            half_median_correlation = np.nanmedian(rho) / 2
+
             logger.info("Min correlation set to: %f", half_median_correlation)
             params["min_corr"] = half_median_correlation
 
-            run_caiman(
-                file_paths=file_paths,
-                parameters=params,
-                sampling_rate=sampling_rate,
-                output_dir=output_dir.as_posix(),
-                is3D=False,
-            )
-        elif acq_software == "ScanImage" and method == "suite2p":
-            from suite2p.run_s2p import run_plane
+            # run caiman motion correction
+            params["is3D"] = False
+            params["fnames"] = [f.as_posix() for f in file_paths]
+            params["fr"] = sampling_rate
 
-            ops_path = find_full_path(processed_root_data_dir, extra_params["ops_path"])
-            run_plane(params, ops_path=ops_path)
+            if "indices" in params:
+                mc_indices = params.pop(
+                    "indices"
+                )  # Indices that restrict FOV for motion correction.
+                mc_indices = slice(*mc_indices[0]), slice(*mc_indices[1])
+                params["motion"] = {
+                    **params.get("motion", {}),
+                    "indices": mc_indices,
+                }
+
+            output_dir = output_dir / "motion_correction"
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            @memoized_result(
+                uniqueness_dict=params,
+                output_directory=output_dir,
+            )
+            def _run_motion_correction():
+                caiman_temp = os.environ.get("CAIMAN_TEMP")
+                os.environ["CAIMAN_TEMP"] = str(output_dir)
+
+                # use 80% of available cores
+                n_processes = int(np.floor(multiprocessing.cpu_count() * 0.8))
+                _, dview, n_processes = cm.cluster.setup_cluster(
+                    backend="multiprocessing", n_processes=n_processes
+                )
+                try:
+                    opts = CNMFParams(params_dict=params)
+                    cnm = CNMF(n_processes, params=opts, dview=dview)
+                    fnames = cnm.params.get("data", "fnames")
+                    logger.info("Starting motion correction (CaImAn)...")
+                    mc = MotionCorrect(fnames, dview=cnm.dview, **cnm.params.motion)
+                    mc.motion_correct(save_movie=True)
+
+                    fname_mc = (
+                        mc.fname_tot_els
+                        if cnm.params.motion["pw_rigid"]
+                        else mc.fname_tot_rig
+                    )
+                    if cnm.params.get("motion", "pw_rigid"):
+                        b0 = np.ceil(
+                            np.maximum(
+                                np.max(np.abs(mc.x_shifts_els)),
+                                np.max(np.abs(mc.y_shifts_els)),
+                            )
+                        ).astype(int)
+                        if cnm.params.get("motion", "is3D"):
+                            cnm.estimates.shifts = [
+                                mc.x_shifts_els,
+                                mc.y_shifts_els,
+                                mc.z_shifts_els,
+                            ]
+                        else:
+                            cnm.estimates.shifts = [mc.x_shifts_els, mc.y_shifts_els]
+                    else:
+                        b0 = np.ceil(np.max(np.abs(mc.shifts_rig))).astype(int)
+                        cnm.estimates.shifts = mc.shifts_rig
+                except Exception as e:
+                    dview.terminate()
+                    raise e
+                else:
+                    cm.stop_server(dview=dview)
+                    logger.info("Motion correction (CaImAn) complete. Saving results.")
+                    cnmf_mc_output_file = output_dir / (
+                        pathlib.Path(fname_mc[0]).stem + "_cnm_mc.hdf5"
+                    )
+                    cnm.save(cnmf_mc_output_file.as_posix())
+                    logger.info("Saving motion correction hdf5.")
+                    mc_output_file = output_dir / (
+                        pathlib.Path(fname_mc[0]).stem + "_mc.hdf5"
+                    )
+                    _save_mc(
+                        mc,
+                        mc_output_file.as_posix(),
+                        params["is3D"],
+                        summary_images={},  # skip summary images here
+                    )
+                    if caiman_temp is not None:
+                        os.environ["CAIMAN_TEMP"] = caiman_temp
+                    else:
+                        del os.environ["CAIMAN_TEMP"]
+                extra_dj_params = {
+                    "cnmf_mc_output_file": cnmf_mc_output_file.relative_to(
+                        processed_root_data_dir
+                    ).as_posix(),
+                    "mc_output_file": mc_output_file.relative_to(
+                        processed_root_data_dir
+                    ).as_posix(),
+                    "fname_mc": [
+                        pathlib.Path(f).relative_to(processed_root_data_dir).as_posix()
+                        for f in fname_mc
+                    ],
+                    "b0": b0,
+                }
+                return extra_dj_params
+
+            extra_dj_params = _run_motion_correction()
+            params["fnames"] = [
+                f.relative_to(processed_root_data_dir).as_posix() for f in file_paths
+            ]
+            params["extra_dj_params"] = extra_dj_params
+
         else:
             raise NotImplementedError(
-                f"Field processing for {acq_software} scans with {method} is not yet supported in this table."
+                f"Field motion correction for {acq_software} scans with {method} is not yet supported in this table."
+            )
+
+        exec_dur = (datetime.utcnow() - execution_time).total_seconds() / 3600
+        self.insert1(
+            {
+                **key,
+                "execution_time": execution_time,
+                "execution_duration": exec_dur,
+                "mc_params": params,
+            }
+        )
+
+
+@schema
+class FieldSegmentation(dj.Computed):
+    definition = """
+    -> FieldMotionCorrection
+    ---
+    execution_time: datetime   # datetime of the start of this step
+    execution_duration: float  # (hour) execution duration
+    """
+
+    def make(self, key):
+        execution_time = datetime.utcnow()
+        processed_root_data_dir = scan.get_processed_root_data_dir()
+
+        output_dir, params = (
+            PreProcessing.Field.proj("processing_output_dir")
+            * FieldMotionCorrection.proj("mc_params")
+            & key
+        ).fetch1("processing_output_dir", "mc_params")
+        extra_params = params.pop("extra_dj_params", {})
+        output_dir = find_full_path(processed_root_data_dir, output_dir)
+
+        acq_software = (scan.Scan & key).fetch1("acq_software")
+        method = (imaging.ProcessingParamSet * imaging.ProcessingTask & key).fetch1(
+            "processing_method"
+        )
+
+        if acq_software == "PrairieView" and method == "caiman":
+            import multiprocessing
+            import h5py
+            import caiman as cm
+            from caiman.source_extraction.cnmf.cnmf import load_CNMF
+
+            cnmf_mc_output_file = find_full_path(
+                processed_root_data_dir, extra_params["cnmf_mc_output_file"]
+            )
+            mc_output_file = find_full_path(
+                processed_root_data_dir, extra_params["mc_output_file"]
+            )
+            fname_mc = [
+                str(find_full_path(processed_root_data_dir, f))
+                for f in extra_params["fname_mc"]
+            ]
+            fnames = [
+                str(find_full_path(processed_root_data_dir, f))
+                for f in params["fnames"]
+            ]
+
+            output_dir = output_dir / "segmentation"
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            @memoized_result(
+                uniqueness_dict={**params, **extra_params},
+                output_directory=output_dir,
+            )
+            def _run_segmentation():
+                # use 80% of available cores
+                n_processes = int(np.floor(multiprocessing.cpu_count() * 0.8))
+                _, dview, n_processes = cm.cluster.setup_cluster(
+                    backend="multiprocessing", n_processes=n_processes
+                )
+
+                cnm = load_CNMF(
+                    cnmf_mc_output_file, n_processes=n_processes, dview=dview
+                )
+                cnm.params.set("data", {"fnames": fnames})
+
+                caiman_temp = os.environ.get("CAIMAN_TEMP")
+                os.environ["CAIMAN_TEMP"] = str(output_dir)
+                try:
+                    b0 = 0
+                    base_name = pathlib.Path(fnames[0]).stem + "_memmap_"
+                    data_set_name = cnm.params.get("data", "var_name_hdf5")
+
+                    logger.info("Generating C-order memmap file...")
+                    fname_new = cm.mmapping.save_memmap(
+                        fname_mc,
+                        base_name=base_name,
+                        order="C",
+                        var_name_hdf5=data_set_name,
+                        border_to_0=b0,
+                    )
+                    Yr, dims, T = cm.mmapping.load_memmap(fname_new)
+                    images = np.reshape(Yr.T, [T] + list(dims), order="F")
+                    cnm.mmap_file = fname_new
+
+                    logger.info("Starting CNMF analysis...")
+                    indices = (slice(None), slice(None))
+                    fit_cnm = cnm.fit(images, indices=indices)
+
+                    Cn = cm.summary_images.local_correlations(
+                        images[:: max(T // 100, 1)], swap_dim=False
+                    )
+                    Cn[np.isnan(Cn)] = 0
+                    fname_init_hdf5 = fname_new[:-5] + "_init.hdf5"
+                    fit_cnm.save(fname_init_hdf5)
+                    # fit_cnm.params.change_params({'p': self.params.get('preprocess', 'p')})
+                    # RE-RUN seeded CNMF on accepted patches to refine and perform deconvolution
+                    cnm2 = fit_cnm.refit(images, dview=cnm.dview)
+                    cnm2.estimates.evaluate_components(
+                        images, cnm2.params, dview=cnm.dview
+                    )
+
+                    cnm2.estimates.detrend_df_f(quantileMin=8, frames_window=250)
+                    cnm2.estimates.Cn = Cn
+                    fname_hdf5 = cnm2.mmap_file[:-4] + "hdf5"
+                    cnm2.save(fname_hdf5)
+
+                except Exception as e:
+                    dview.terminate()
+                    raise e
+                else:
+                    cm.stop_server(dview=dview)
+                    logger.info("CNMF analysis complete. Saving results.")
+                    cnmf_output_file = pathlib.Path(fname_hdf5)
+
+                    logger.info("Compute summary images...")
+                    summary_images = {
+                        "average_image": np.mean(images[:: max(T // 100, 1)], axis=0),
+                        "max_image": np.max(images[:: max(T // 100, 1)], axis=0),
+                        "correlation_image": Cn,
+                    }
+                    # open mc_output_file, copy the "/motion_correction" over to cnmf_output_file
+                    logger.info("Copy '/motion_correction' to output file...")
+                    with h5py.File(mc_output_file, "r") as h5mc:
+                        with h5py.File(cnmf_output_file, "r+") as h5f:
+                            h5mc.copy("/motion_correction", h5f)
+                            h5g = h5f.get("/motion_correction")
+                            for img_type, img in summary_images.items():
+                                if img_type not in h5g:
+                                    h5g.require_dataset(
+                                        img_type,
+                                        shape=np.shape(img),
+                                        data=img,
+                                        dtype=img.dtype,
+                                    )
+
+                    if caiman_temp is not None:
+                        os.environ["CAIMAN_TEMP"] = caiman_temp
+                    else:
+                        del os.environ["CAIMAN_TEMP"]
+
+            _run_segmentation()
+        else:
+            raise NotImplementedError(
+                f"Field Segmentation for {acq_software} scans with {method} is not yet supported in this table."
             )
 
         exec_dur = (datetime.utcnow() - execution_time).total_seconds() / 3600
@@ -319,9 +529,9 @@ class FieldProcessing(dj.Computed):
 
 
 @schema
-class FieldPostProcessing(dj.Computed):
+class PostProcessing(dj.Computed):
     definition = """
-    -> FieldPreprocessing
+    -> PreProcessing
     ---
     execution_time: datetime   # datetime of the start of this step
     execution_duration: float  # (hour) execution duration
@@ -330,36 +540,28 @@ class FieldPostProcessing(dj.Computed):
     @property
     def key_source(self):
         """
-        Find FieldPreprocessing entries that have finished processing for all fields
+        Find PreProcessing entries that have finished processing for all fields
         """
         per_plane_proc = (
-            FieldPreprocessing.aggr(
-                FieldPreprocessing.Field.proj(),
-                field_count="count(*)",
+            PreProcessing.aggr(
+                PreProcessing.Field.proj(),
+                field_count="count(field_idx)",
                 keep_all_rows=True,
             )
-            * FieldPreprocessing.aggr(
-                FieldProcessing.proj(),
-                finished_field_count="count(*)",
+            * PreProcessing.aggr(
+                FieldSegmentation.proj(),
+                finished_field_count="count(field_idx)",
                 keep_all_rows=True,
             )
             & "field_count = finished_field_count"
         )
-        return FieldPreprocessing & per_plane_proc
+        return PreProcessing & per_plane_proc
 
     def make(self, key):
         execution_time = datetime.utcnow()
         method, params = (
             imaging.ProcessingTask * imaging.ProcessingParamSet & key
         ).fetch1("processing_method", "params")
-
-        if method == "suite2p" and params.get("combined", True):
-            from suite2p import io
-
-            output_dir = (imaging.ProcessingTask & key).fetch1("processing_output_dir")
-            output_dir = find_full_path(scan.get_imaging_root_data_dir(), output_dir)
-
-            io.combined(output_dir / "suite2p", save=True)
 
         exec_dur = (datetime.utcnow() - execution_time).total_seconds() / 3600
         self.insert1(
