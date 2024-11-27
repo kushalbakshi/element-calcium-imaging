@@ -291,56 +291,6 @@ class ProcessingTask(dj.Manual):
 
 
 @schema
-class ZDriftParamSet(dj.Manual):
-    definition = """
-    zdrift_paramset_idx: int
-    ---
-    z_paramset_desc: varchar(1280)  # Parameter-set description
-    z_param_set_hash: uuid  # # A universally unique identifier for the parameter set.
-    z_params: longblob  # Parameter Set, a dictionary of all z-drift parameters.
-    """
-
-    @classmethod
-    def insert_new_params(
-        cls,
-        zdrift_paramset_idx: int,
-        z_paramset_desc: str,
-        z_params: dict,
-    ):
-        """Insert a parameter set into ZDriftParamSet table.
-
-        This function automates the parameter set hashing and avoids insertion of an
-            existing parameter set.
-
-        Attributes:
-            zdrift_paramset_idx (int): Unique parameter set ID.
-            z_paramset_desc (str): Parameter set description.
-            z_params (dict): Parameter Set, all applicable parameters to the
-            z-axis correlation analysis.
-        """
-        param_dict = {
-            "zdrift_paramset_idx": zdrift_paramset_idx,
-            "z_paramset_desc": z_paramset_desc,
-            "z_params": z_params,
-            "z_param_set_hash": dict_to_uuid(z_params),
-        }
-        q_param = cls & {"z_param_set_hash": param_dict["z_param_set_hash"]}
-
-        if q_param:  # If the specified param-set already exists
-            p_name = q_param.fetch1("zdrift_paramset_idx")
-            if (
-                p_name == zdrift_paramset_idx
-            ):  # If the existed set has the same name: job done
-                return
-            else:  # If not same name: human error, trying to add the same paramset with different name
-                raise dj.DataJointError(
-                    "The specified param-set already exists - name: {}".format(p_name)
-                )
-        else:
-            cls.insert1(param_dict)
-
-
-@schema
 class ZDriftMetrics(dj.Computed):
     """Generate z-axis motion report and drop frames with high motion.
 
@@ -351,12 +301,18 @@ class ZDriftMetrics(dj.Computed):
     """
 
     definition = """
-    -> scan.Scan
-    -> ZDriftParamSet
+    -> ProcessingTask
     ---
     bad_frames=NULL: longblob  # `True` if any value in z_drift > threshold from drift_params.
     z_drift: longblob   # Amount of drift in microns per frame in Z direction.
     """
+
+    _default_params = {
+        "pad_length": 5,
+        "slice_interval": 1,
+        "num_scans": 5,
+        "bad_frames_threshold": 3
+    }
 
     def make(self, key):
         import nd2
@@ -367,7 +323,15 @@ class ZDriftMetrics(dj.Computed):
             return np.convolve(m, k, mode="full") / k.sum()
 
         nchannels = (scan.ScanInfo & key).fetch1("nchannels")
-        drift_params = (ZDriftParamSet & key).fetch1("z_params")
+        params = (ProcessingTask * ProcessingParamSet & key).fetch1(
+            "params"
+        )
+        drift_params = params.get("ZDRIFT_PARAMS", self._default_params)
+
+        # use the same channel specified in ProcessingParamSet for this task
+        drift_params["channel"] = params.get("align_by_chan", 1)
+        drift_params["channel"] -= 1  # change to 0-based indexing
+
         image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
         image_files = [
             find_full_path(get_imaging_root_data_dir()[0], image_file)
@@ -558,12 +522,7 @@ class Processing(dj.Computed):
             else:
                 raise NotImplementedError("Unknown method: {}".format(method))
         elif task_mode == "trigger":
-            try:
-                drop_frames = (ZDriftMetrics & key).fetch1("bad_frames")
-            except dj.DataJointError:
-                raise dj.DataJointError(
-                    "Processing more than 1 set of `bad_frames` per scan is not currently supported."
-                )
+            drop_frames = (ZDriftMetrics & key).fetch1("bad_frames")
             if drop_frames.size > 0:
                 np.save(pathlib.Path(output_dir) / "bad_frames.npy", drop_frames)
                 raw_image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
@@ -579,7 +538,6 @@ class Processing(dj.Computed):
                         image_files.append((pathlib.Path(output_dir) / file.name))
                     else:
                         image_files.append((pathlib.Path(output_dir) / file.name))
-
             else:
                 image_files = (scan.ScanInfo.ScanFile & key).fetch("file_path")
                 image_files = [
@@ -592,12 +550,15 @@ class Processing(dj.Computed):
                 "processing_method"
             )
 
+            params = (ProcessingTask * ProcessingParamSet & key).fetch1(
+                    "params"
+                )
+            params.pop("ZDRIFT_PARAMS", None)
+
             if method == "suite2p":
                 import suite2p
 
-                suite2p_params = (ProcessingTask * ProcessingParamSet & key).fetch1(
-                    "params"
-                )
+                suite2p_params = params
                 suite2p_params["save_path0"] = output_dir
                 (
                     suite2p_params["fs"],
@@ -622,9 +583,7 @@ class Processing(dj.Computed):
                 from element_interface.caiman_loader import _process_scanimage_tiff
                 from element_interface.run_caiman import run_caiman
 
-                caiman_params = (ProcessingTask * ProcessingParamSet & key).fetch1(
-                    "params"
-                )
+                caiman_params = params
                 sampling_rate, ndepths, nchannels = (scan.ScanInfo & key).fetch1(
                     "fps", "ndepths", "nchannels"
                 )
@@ -663,8 +622,6 @@ class Processing(dj.Computed):
                 from scipy.io import savemat
 
                 # Motion Correction with Suite2p
-                params = (ProcessingTask * ProcessingParamSet & key).fetch1("params")
-
                 params["suite2p"]["save_path0"] = output_dir
                 (
                     params["suite2p"]["fs"],
