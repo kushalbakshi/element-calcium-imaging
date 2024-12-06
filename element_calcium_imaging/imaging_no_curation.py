@@ -298,7 +298,7 @@ class ZDriftMetrics(dj.Computed):
         ProcessingTask (foreign key): Primary key from ProcessingTask.
         ZDriftParamSet (foreign key): Primary key from ZDriftParamSet.
         z_drift (longblob): Amount of drift in microns per frame in Z direction.
-        bad_frames_threshold (int): Drift threshold in microns where frames are excluded from registration.
+        bad_frames_threshold (float): Drift threshold in microns where frames are excluded from registration.
         percent_bad_frames (float): Percentage of frames with z-drift exceeding the threshold.
     """
 
@@ -307,7 +307,7 @@ class ZDriftMetrics(dj.Computed):
     ---
     bad_frames=NULL: longblob  # `True` if any value in z_drift > threshold from drift_params.
     z_drift: longblob   # Amount of drift in microns per frame in Z direction.
-    bad_frames_threshold: int  # Drift threshold in microns where frames are excluded from registration.
+    bad_frames_threshold: float  # Drift threshold in microns where frames are excluded from registration.
     percent_bad_frames: float  # Percentage of frames with z-drift exceeding the threshold.
     """
 
