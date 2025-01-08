@@ -351,6 +351,22 @@ class Processing(dj.Computed):
     package_version=''  : varchar(16)
     """
 
+    class File(dj.Part):
+        """Stores the file paths of the processed imaging data.
+        
+        Attributes:
+            Processing (foreign key): Primary key from Processing.
+            file_name (str): File name.
+            file (str): File path.
+        """
+        
+        definition = """# Processed imaging data files
+        -> master
+        file_name: varchar(255)
+        ---
+        file: filepath@imaging-processed  # File path
+        """
+
     # Run processing only on Scan with ScanInfo inserted
     @property
     def key_source(self):
@@ -537,6 +553,17 @@ class Processing(dj.Computed):
             raise ValueError(f"Unknown task mode: {task_mode}")
 
         self.insert1({**key, "package_version": ""})
+        self.File.insert(
+            [
+                {
+                    **key,
+                    "file_name": f.relative_to(output_dir).as_posix(),
+                    "file": f,
+                }
+                for f in output_dir.rglob("*")
+                if f.is_file()
+            ]
+        )
 
 
 # -------------- Motion Correction --------------
