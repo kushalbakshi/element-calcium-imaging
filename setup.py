@@ -13,13 +13,6 @@ with open(path.join(here, "README.md"), "r") as f:
 with open(path.join(here, pkg_name, "version.py")) as f:
     exec(f.read())
 
-with urllib.request.urlopen(
-    "https://raw.githubusercontent.com/datajoint/CaImAn/master/requirements.txt"
-) as f:
-    caiman_requirements = f.read().decode("UTF-8").split("\n")
-
-caiman_requirements.remove("")
-caiman_requirements.append("future")
 
 setup(
     name=pkg_name.replace("_", "-"),
@@ -42,7 +35,6 @@ setup(
         "element-interface @ git+https://github.com/datajoint/element-interface.git",
     ],
     extras_require={
-        "caiman_requirements": [caiman_requirements],
         "caiman": ["caiman @ git+https://github.com/datajoint/CaImAn.git"],
         "elements": [
             "element-animal @ git+https://github.com/datajoint/element-animal.git",
