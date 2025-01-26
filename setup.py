@@ -35,7 +35,7 @@ setup(
         "element-interface @ git+https://github.com/datajoint/element-interface.git",
     ],
     extras_require={
-        "caiman": ["caiman @ git+https://github.com/datajoint/CaImAn.git"],
+        "caiman": ["caiman @ git+https://github.com/kushalbakshi/CaImAn.git@dev_update-caiman"],
         "elements": [
             "element-animal @ git+https://github.com/datajoint/element-animal.git",
             "element-event @ git+https://github.com/datajoint/element-event.git",
