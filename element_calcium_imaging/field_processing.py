@@ -427,7 +427,7 @@ class FieldSegmentation(dj.Computed):
             )
             def _run_segmentation():
                 # use 80% of available cores
-                n_processes = int(np.floor(multiprocessing.cpu_count() * 0.8))
+                n_processes = 10
                 _, dview, n_processes = cm.cluster.setup_cluster(
                     backend="multiprocessing", n_processes=n_processes
                 )
